@@ -13,9 +13,7 @@ spec:
   policyTypes:
     - Ingress
   ingress:
-    # Allow incoming HTTP traffic on port 8000 routed via Kubernetes Gateway controller
-    - from:
-        - namespaceSelector: {}
-      ports:
+    # Allow incoming HTTP traffic on port 8000 (routed via Gateway, Prometheus, NodePort)
+    - ports:
         - protocol: TCP
           port: 8000
