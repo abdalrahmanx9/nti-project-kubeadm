@@ -20,8 +20,8 @@ Developer Git Push / PR
 +-------------------------------------------------------------+
 | AWS Infrastructure (Terraform)                              |
 | - VPC (public, private, db subnets across 2 AZs)            |
-| - 1x Control plane (t3.medium + Elastic IP)                 |
-| - 2x Worker nodes (t3.medium)                               |
+| - 1x Control plane (t3.small + Elastic IP)                  |
+| - 2x Worker nodes (t3.small)                                |
 | - PostgreSQL RDS in isolated DB subnets                     |
 | - ECR private repository                                    |
 | - Secrets Manager (database credentials)                    |

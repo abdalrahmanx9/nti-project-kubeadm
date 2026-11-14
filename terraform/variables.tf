@@ -25,13 +25,13 @@ variable "cluster_name" {
 variable "master_instance_type" {
   description = "Instance type for the Kubeadm Control Plane"
   type        = string
-  default     = "t3.medium"
+  default     = "t3.small"
 }
 
 variable "worker_instance_type" {
   description = "Instance type for the Kubeadm Worker Nodes"
   type        = string
-  default     = "t3.medium"
+  default     = "t3.small"
 }
 
 variable "worker_count" {
