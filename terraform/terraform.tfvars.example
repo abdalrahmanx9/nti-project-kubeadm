@@ -1,0 +1,12 @@
+aws_region           = "us-east-1"
+environment          = "production"
+vpc_cidr             = "10.0.0.0/16"
+cluster_name         = "nti-devops-kubeadm"
+master_instance_type = "t3.medium"
+worker_instance_type = "t3.medium"
+worker_count         = 2
+ssh_key_name         = "nti-devops-key"
+admin_cidr           = "0.0.0.0/0"
+db_name              = "ntiapp"
+db_username          = "dbadmin"
+db_instance_class    = "db.t3.micro"
