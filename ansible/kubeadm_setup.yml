@@ -51,6 +51,10 @@
           - gnupg
           - lsb-release
           - software-properties-common
+          - conntrack
+          - socat
+          - ipset
+          - iptables
         state: present
         update_cache: true
 
@@ -79,6 +83,16 @@
         regexp: 'SystemdCgroup = false'
         replace: 'SystemdCgroup = true'
       notify: Restart containerd
+
+    - name: Set containerd sandbox image
+      replace:
+        path: /etc/containerd/config.toml
+        regexp: 'sandbox_image = ".*"'
+        replace: 'sandbox_image = "registry.k8s.io/pause:3.10"'
+      notify: Restart containerd
+
+    - name: Flush handlers to apply containerd config
+      meta: flush_handlers
 
     - name: Enable containerd
       service:
