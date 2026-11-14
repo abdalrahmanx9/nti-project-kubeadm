@@ -81,31 +81,35 @@ Developer Git Push / PR
 - GitHub repository secrets configured:
   - `AWS_ACCESS_KEY_ID`
   - `AWS_SECRET_ACCESS_KEY`
-  - `SSH_PRIVATE_KEY` (PEM content for EC2 access)
-- GitHub Environment `production` configured if manual approval is required before apply.
+- EC2 SSH Key Pair (`nti-devops-key.pem`) available on operator machine for Ansible.
 
-### Deploy Infrastructure & Cluster via GitHub CLI
+## Deployment Workflow
+
+### 1. Provision Infrastructure via GitHub Actions
+Run the Terraform workflow to create VPC, EC2 nodes, RDS, and ECR:
 ```bash
-gh workflow run terraform.yml -f action=plan-and-apply -f bootstrap_cluster=true
+gh workflow run terraform.yml -f action=plan-and-apply
 gh run watch
 ```
+When complete, the workflow summary displays the public and private IPs of the nodes.
 
-### Manual / Local Deployment (Optional)
-If running outside of GitHub Actions:
+### 2. Bootstrap Kubeadm Cluster via Ansible
+Operator runs Ansible locally or from a bastion against the new nodes:
+```bash
+cd ansible
+cp inventory.example.ini inventory.ini
+# Set control plane and worker public IPs from step 1
 
-1. **Terraform**:
-   ```bash
-   cd terraform
-   cp terraform.tfvars.example terraform.tfvars
-   terraform init
-   terraform plan -out=tfplan
-   terraform apply tfplan
-   ```
+# Run playbook (Linux / macOS):
+ansible-playbook -i inventory.ini kubeadm_setup.yml
 
-2. **Ansible**:
-   ```bash
-   cd ../ansible
-   cp inventory.example.ini inventory.ini
-   # Add your control plane and worker public IPs from terraform output
-   ansible-playbook -i inventory.ini kubeadm_setup.yml
+# Or run using Docker runner on Windows:
+.\run-playbook.ps1 kubeadm_setup.yml
+```
+
+### 3. Verify Cluster
+```bash
+ssh -i ~/.ssh/nti-devops-key.pem ubuntu@<CONTROL_PLANE_IP>
+kubectl get nodes -o wide
+```
    ```
