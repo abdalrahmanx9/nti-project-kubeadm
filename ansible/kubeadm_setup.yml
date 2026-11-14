@@ -1,0 +1,211 @@
+---
+- name: Configure cluster prerequisites
+  hosts: k8s_cluster
+  become: true
+  tasks:
+    - name: Disable swap
+      command: swapoff -a
+      changed_when: false
+
+    - name: Disable swap in fstab
+      replace:
+        path: /etc/fstab
+        regexp: '^(\s*)([^#\n]+\s+swap\s+.*)$'
+        replace: '# \2'
+
+    - name: Load kernel modules configuration
+      copy:
+        dest: /etc/modules-load.d/k8s.conf
+        content: |
+          overlay
+          br_netfilter
+        mode: '0644'
+
+    - name: Load kernel modules
+      modprobe:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - overlay
+        - br_netfilter
+
+    - name: Configure sysctl parameters
+      copy:
+        dest: /etc/sysctl.d/k8s.conf
+        content: |
+          net.bridge.bridge-nf-call-iptables  = 1
+          net.bridge.bridge-nf-call-ip6tables = 1
+          net.ipv4.ip_forward                 = 1
+        mode: '0644'
+
+    - name: Apply sysctl
+      command: sysctl --system
+      changed_when: false
+
+    - name: Install dependencies
+      apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - gnupg
+          - lsb-release
+          - software-properties-common
+        state: present
+        update_cache: true
+
+    - name: Create keyrings directory
+      file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: '0755'
+
+    - name: Install containerd
+      apt:
+        name: containerd
+        state: present
+        update_cache: true
+
+    - name: Generate containerd default configuration
+      shell: |
+        mkdir -p /etc/containerd
+        containerd config default > /etc/containerd/config.toml
+      args:
+        creates: /etc/containerd/config.toml
+
+    - name: Set containerd SystemdCgroup
+      replace:
+        path: /etc/containerd/config.toml
+        regexp: 'SystemdCgroup = false'
+        replace: 'SystemdCgroup = true'
+      notify: Restart containerd
+
+    - name: Enable containerd
+      service:
+        name: containerd
+        state: started
+        enabled: true
+
+    - name: Add Kubernetes apt key
+      get_url:
+        url: "https://pkgs.k8s.io/core:/stable:/v1.31/deb/Release.key"
+        dest: /etc/apt/keyrings/kubernetes-apt-keyring.asc
+        mode: '0644'
+        force: true
+
+    - name: Add Kubernetes apt repository
+      copy:
+        dest: /etc/apt/sources.list.d/kubernetes.list
+        content: "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.asc] https://pkgs.k8s.io/core:/stable:/v1.31/deb/ /\n"
+        mode: '0644'
+
+    - name: Install Kubernetes components
+      apt:
+        name:
+          - kubelet
+          - kubeadm
+          - kubectl
+        state: present
+        update_cache: true
+
+    - name: Hold Kubernetes packages
+      dpkg_selections:
+        name: "{{ item }}"
+        selection: hold
+      loop:
+        - kubelet
+        - kubeadm
+        - kubectl
+
+    - name: Enable kubelet
+      service:
+        name: kubelet
+        enabled: true
+
+  handlers:
+    - name: Restart containerd
+      service:
+        name: containerd
+        state: restarted
+
+
+- name: Initialize control plane
+  hosts: control_plane
+  become: true
+  tasks:
+    - name: Check if cluster is initialized
+      stat:
+        path: /etc/kubernetes/admin.conf
+      register: kubeadmin_conf
+
+    - name: Run kubeadm init
+      command: >
+        kubeadm init
+        --pod-network-cidr={{ pod_network_cidr | default('192.168.0.0/16') }}
+        --apiserver-cert-extra-sans={{ ansible_host }}
+      when: not kubeadmin_conf.stat.exists
+      register: kubeadm_init_output
+
+    - name: Configure root kubeconfig
+      file:
+        path: /root/.kube
+        state: directory
+        mode: '0755'
+
+    - name: Copy admin.conf to root
+      copy:
+        src: /etc/kubernetes/admin.conf
+        dest: /root/.kube/config
+        remote_src: true
+        mode: '0600'
+
+    - name: Configure ubuntu user kubeconfig
+      file:
+        path: /home/ubuntu/.kube
+        state: directory
+        owner: ubuntu
+        group: ubuntu
+        mode: '0755'
+
+    - name: Copy admin.conf to ubuntu user
+      copy:
+        src: /etc/kubernetes/admin.conf
+        dest: /home/ubuntu/.kube/config
+        remote_src: true
+        owner: ubuntu
+        group: ubuntu
+        mode: '0600'
+
+    - name: Apply Calico CNI
+      become_user: ubuntu
+      command: kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.28.0/manifests/calico.yaml
+      register: calico_result
+      changed_when: "'created' in calico_result.stdout or 'configured' in calico_result.stdout"
+
+    - name: Apply Ingress-Nginx
+      become_user: ubuntu
+      command: kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/baremetal/deploy.yaml
+      register: ingress_result
+      changed_when: "'created' in ingress_result.stdout or 'configured' in ingress_result.stdout"
+
+    - name: Generate worker join command
+      command: kubeadm token create --print-join-command
+      register: join_command_raw
+
+    - name: Store join command
+      set_fact:
+        worker_join_command: "{{ join_command_raw.stdout }}"
+
+
+- name: Join worker nodes
+  hosts: workers
+  become: true
+  tasks:
+    - name: Check if worker is joined
+      stat:
+        path: /etc/kubernetes/kubelet.conf
+      register: kubelet_conf
+
+    - name: Join node to cluster
+      command: "{{ hostvars[groups['control_plane'][0]]['worker_join_command'] }}"
+      when: not kubelet_conf.stat.exists
