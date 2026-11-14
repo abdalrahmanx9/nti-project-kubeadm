@@ -34,7 +34,7 @@ variable "worker_count" {
 variable "ssh_key_name" {
   description = "EC2 Key Pair name for SSH access"
   type        = string
-  default     = ""
+  default     = "nti-devops-key"
 }
 
 variable "admin_cidr" {

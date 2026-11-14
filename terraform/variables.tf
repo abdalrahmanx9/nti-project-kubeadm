@@ -43,7 +43,7 @@ variable "worker_count" {
 variable "ssh_key_name" {
   description = "AWS EC2 Key Pair name for SSH access to cluster nodes"
   type        = string
-  default     = ""
+  default     = "nti-devops-key"
 }
 
 variable "admin_cidr" {
