@@ -1,0 +1,153 @@
+name: "Terraform and Kubeadm Infrastructure Pipeline"
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Action to execute"
+        required: true
+        default: "plan-and-apply"
+        type: choice
+        options:
+          - "plan-and-apply"
+          - "plan-only"
+          - "destroy"
+      bootstrap_cluster:
+        description: "Run Ansible to bootstrap Kubeadm after apply"
+        required: true
+        type: boolean
+        default: true
+  pull_request:
+    paths:
+      - "terraform/**"
+      - ".github/workflows/terraform.yml"
+
+permissions:
+  contents: read
+  id-token: write
+  pull-requests: write
+
+env:
+  AWS_REGION: "us-east-1"
+  TF_VERSION: "1.9.8"
+
+jobs:
+  terraform-plan:
+    name: "Terraform Plan"
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: terraform
+    outputs:
+      action: ${{ github.event.inputs.action || 'plan-only' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - run: terraform fmt -check
+      - run: terraform init -input=false
+      - run: terraform validate
+
+      - name: Terraform Plan
+        id: plan
+        run: |
+          ACTION="${{ github.event.inputs.action || 'plan-only' }}"
+          if [ "$ACTION" = "destroy" ]; then
+            terraform plan -destroy -out=tfplan
+          else
+            terraform plan -out=tfplan
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tfplan
+          path: terraform/tfplan
+          retention-days: 2
+
+  terraform-apply:
+    name: "Terraform Apply and Bootstrap"
+    needs: [terraform-plan]
+    if: |
+      github.event_name == 'workflow_dispatch' &&
+      github.event.inputs.action != 'plan-only'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: terraform
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - run: terraform init -input=false
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: tfplan
+          path: terraform
+
+      - name: Terraform Apply
+        run: terraform apply -input=false tfplan
+
+      - name: Bootstrap Kubeadm with Ansible
+        if: |
+          github.event.inputs.action != 'destroy' &&
+          github.event.inputs.bootstrap_cluster == 'true'
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          if [ -z "$SSH_PRIVATE_KEY" ]; then
+            echo "SSH_PRIVATE_KEY secret is not set. Skipping Ansible."
+            exit 0
+          fi
+
+          mkdir -p ~/.ssh
+          echo "$SSH_PRIVATE_KEY" > ~/.ssh/nti-devops-key.pem
+          chmod 600 ~/.ssh/nti-devops-key.pem
+
+          MASTER_IP=$(terraform output -raw control_plane_public_ip)
+          WORKER_IPS=$(terraform output -json worker_public_ips | jq -r '.[]')
+
+          cd ../ansible
+
+          printf "[control_plane]\nk8s-master ansible_host=%s ansible_user=ubuntu ansible_ssh_private_key_file=~/.ssh/nti-devops-key.pem\n\n[workers]\n" "$MASTER_IP" > inventory.ini
+
+          INDEX=1
+          for IP in $WORKER_IPS; do
+            printf "k8s-worker-%s ansible_host=%s ansible_user=ubuntu ansible_ssh_private_key_file=~/.ssh/nti-devops-key.pem\n" "$INDEX" "$IP" >> inventory.ini
+            INDEX=$((INDEX + 1))
+          done
+
+          printf "\n[k8s_cluster:children]\ncontrol_plane\nworkers\n\n[all:vars]\nansible_python_interpreter=/usr/bin/python3\nansible_ssh_common_args='-o StrictHostKeyChecking=no'\nk8s_version=\"1.31\"\npod_network_cidr=\"192.168.0.0/16\"\n" >> inventory.ini
+
+          sudo apt-get update && sudo apt-get install -y ansible
+
+          for i in {1..30}; do
+            if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -i ~/.ssh/nti-devops-key.pem ubuntu@$MASTER_IP "echo ready" 2>/dev/null; then
+              break
+            fi
+            sleep 10
+          done
+
+          ANSIBLE_HOST_KEY_CHECKING=False ansible-playbook -i inventory.ini kubeadm_setup.yml

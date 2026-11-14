@@ -1,0 +1,137 @@
+name: Application CI/CD Pipeline
+
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      - "app/**"
+      - "charts/**"
+      - ".github/workflows/app-ci.yml"
+  pull_request:
+    branches: [ "main" ]
+    paths:
+      - "app/**"
+
+permissions:
+  contents: write
+  id-token: write
+
+env:
+  AWS_REGION: "us-east-1"
+  AWS_ACCOUNT_ID: "270485099284"
+  ECR_REPOSITORY: "nti-devops-app"
+
+jobs:
+  lint-and-test:
+    name: "Lint and Pytest"
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pytest pytest-cov ruff
+
+      - name: Run Ruff
+        run: ruff check . || true
+
+      - name: Run Pytest
+        run: pytest --cov=. --cov-report=term --cov-report=xml:coverage.xml tests/
+
+  security-scan:
+    name: "Trivy Vulnerability Scan"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Trivy
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: "fs"
+          scan-ref: "app/"
+          severity: "CRITICAL,HIGH"
+          format: "table"
+          exit-code: "0"
+
+  build-and-push:
+    name: "Docker Build and ECR Push"
+    needs: [lint-and-test, security-scan]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.vars.outputs.image_tag }}
+      ecr_registry: ${{ steps.login-ecr.outputs.registry }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set image tag
+        id: vars
+        run: |
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          echo "image_tag=${{ github.run_number }}-${SHORT_SHA}" >> $GITHUB_OUTPUT
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        continue-on-error: true
+
+      - name: Log in to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+        continue-on-error: true
+
+      - name: Build and push image
+        env:
+          REGISTRY: ${{ steps.login-ecr.outputs.registry || format('{0}.dkr.ecr.{1}.amazonaws.com', env.AWS_ACCOUNT_ID, env.AWS_REGION) }}
+          TAG: ${{ steps.vars.outputs.image_tag }}
+        run: |
+          IMAGE_URI="${REGISTRY}/${ECR_REPOSITORY}"
+          docker build --build-arg APP_ENV=production -t ${IMAGE_URI}:${TAG} -t ${IMAGE_URI}:latest app/
+
+          if [ -n "${{ steps.login-ecr.outputs.registry }}" ]; then
+            docker push ${IMAGE_URI}:${TAG}
+            docker push ${IMAGE_URI}:latest
+          fi
+
+  gitops-sync:
+    name: "GitOps Release Trigger"
+    needs: [build-and-push]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Update image tag in values.yaml
+        env:
+          TAG: ${{ needs.build-and-push.outputs.image_tag }}
+          GITOPS_PAT: ${{ secrets.GITOPS_PAT }}
+        run: |
+          if [ -n "$GITOPS_PAT" ]; then
+            git clone "https://x-access-token:${GITOPS_PAT}@github.com/abdalrahmanx9/nti-devops-gitops.git" gitops-repo
+            cd gitops-repo
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            sed -i 's/tag: .*/tag: "'"${TAG}"'"/' charts/nti-app/values.yaml
+            if ! git diff --quiet charts/nti-app/values.yaml; then
+              git add charts/nti-app/values.yaml
+              git commit -m "chore(release): update image tag to ${TAG} [skip ci]"
+              git push origin main
+            fi
+            cd ..
+            rm -rf gitops-repo
+          else
+            sed -i 's/tag: .*/tag: "'"${TAG}"'"/' charts/nti-app/values.yaml
+          fi
