@@ -15,7 +15,7 @@ data "aws_ami" "ubuntu" {
 
 resource "aws_security_group" "k8s_nodes" {
   name        = "${var.environment}-kubeadm-nodes-sg"
-  description = "Security group for Kubeadm nodes"
+  description = "Security group for Kubeadm control plane and worker nodes"
   vpc_id      = var.vpc_id
 
   ingress {
@@ -75,6 +75,10 @@ resource "aws_security_group" "k8s_nodes" {
 
   tags = {
     Name = "${var.environment}-kubeadm-nodes-sg"
+  }
+
+  lifecycle {
+    create_before_destroy = true
   }
 }
 
